@@ -1,0 +1,315 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Net.Mail;
+using System.Web.Security;
+using System.Web.Mvc;
+using RegistrationAndLogin.Models;
+
+namespace RegistrationAndLogin.Controllers
+{
+    public class UserController : Controller
+    {
+        //Registration Action Method For View
+        public ActionResult Registration()
+        {
+            return View();
+        }
+
+        //Registration Post Action
+        [HttpPost]
+        [ValidateAntiForgeryToken]        
+        public ActionResult Registration([Bind(Exclude = "IsEmailVerified, ActivationCode")] User user)
+        {
+            bool Status = false;
+            string Message = "";
+
+            //Model Validation
+            if(ModelState.IsValid)
+            {
+                #region//Email is already Exist
+                var isExist = IsEmailExist(user.EmailID);
+                if(isExist)
+                {
+                    ModelState.AddModelError("EmailExist", "This Email is already Exist into the database");
+                    return View(user);
+                }
+                #endregion
+
+                #region Generate Activation code
+                user.ActivationCode = Guid.NewGuid();
+                #endregion
+
+                #region Password Hashing
+                user.Password = Crypto.Hash(user.Password);
+                user.ConfirmPassword = Crypto.Hash(user.ConfirmPassword);
+                #endregion
+                user.IsEmailVerified = false;
+
+                #region Save data to Database
+                using (UserAuthenticationEntities db = new UserAuthenticationEntities())
+                {
+                    db.Users.Add(user);
+                    db.SaveChanges();
+                    #region Send Email to User
+                    SendVerificationLinkEmail(user.EmailID, user.ActivationCode.ToString());
+                    Message = "Registration successfully done. Account activation link" +
+                        "has been sent to your email Id:" + user.EmailID;
+                    Status = true;
+                    #endregion
+                }
+                #endregion
+
+            }
+            else
+            {
+                Message = "Invalid Request";
+            }
+            ViewBag.Message = Message;
+            ViewBag.Status = Status;
+            return View(user);
+        }
+
+        //Verify Account
+        [HttpGet]
+        public ActionResult VerifyAccount(string id)
+        {
+            bool Status = false;
+            using (UserAuthenticationEntities db = new UserAuthenticationEntities())
+            {
+                db.Configuration.ValidateOnSaveEnabled = false; // This line is added here to avoid confirm password 
+                                                                //does not match issue on save change.
+
+                var v = db.Users.Where(a => a.ActivationCode == new Guid(id)).FirstOrDefault();
+                if(v != null)
+                {
+                    v.IsEmailVerified = true;
+                    db.SaveChanges();
+                    Status = true;
+                }
+                else
+                {
+                    ViewBag.Message = "Invalid Request";
+                }
+            }
+            ViewBag.Status = Status;
+            return View();
+        }    
+
+        // Login Method For View
+        [HttpGet]
+        public ActionResult Login()
+        {
+            return View();
+        }
+
+        //Login Post
+        [HttpPost]
+        public ActionResult Login(UserLogin login, string ReturnUrl)
+        {
+            string message = "";
+            using (UserAuthenticationEntities db = new UserAuthenticationEntities())
+            {
+                var v = db.Users.Where(a => a.EmailID == login.EmailID).FirstOrDefault();
+                if(v !=null)
+                {
+                    if(string.Compare(Crypto.Hash(login.Password), v.Password) ==0)
+                    {
+                        // To check if User email is verified or not 
+                       if(v.IsEmailVerified==true)
+                        {
+                            int timeout = login.RememberMe ? 525600 : 20; //525600 min  -1 year
+                            var ticket = new FormsAuthenticationTicket(login.EmailID, login.RememberMe, timeout);
+                            string encrypted = FormsAuthentication.Encrypt(ticket);
+                            var cookie = new System.Web.HttpCookie(FormsAuthentication.FormsCookieName, encrypted);
+                            cookie.Expires = DateTime.Now.AddMinutes(timeout);
+                            cookie.HttpOnly = true;
+                            Response.Cookies.Add(cookie);
+
+                            if (Url.IsLocalUrl(ReturnUrl))
+                            {
+                                return Redirect(ReturnUrl);
+                            }
+                            else
+                            {
+                                return RedirectToAction("Index", "Home");
+                            }
+                        }
+                        else
+                        {
+                            message = "This Email Id is not verified yet, Please verify your email and try again, Thank you!!!";
+                        }
+                    }
+                    else
+                    {
+                        message = "Invalid Credential Provided!!!";
+                    }
+
+                }
+                else
+                {
+                    message = "Invalid Credential Provided!!!";
+                }
+            }
+
+                ViewBag.Message = message;
+            return View();
+        }
+        //Logout
+        [Authorize]
+        [HttpPost]
+        public ActionResult Logout()
+        {
+            FormsAuthentication.SignOut();
+            return RedirectToAction("Login", "User");
+        }
+
+        [NonAction]
+        public bool IsEmailExist(string emailID)
+        {
+            using (UserAuthenticationEntities db = new UserAuthenticationEntities())
+            {
+                var v = db.Users.Where(a => a.EmailID == emailID).FirstOrDefault();
+                return v != null;
+
+            }
+        }
+        [NonAction]
+        [AllowAnonymous]
+        //Go to Account Manage->Sequrty->Less secure apps
+        public void SendVerificationLinkEmail(string emailId, string activationCode, string emailFor = "VerifyAccount")
+        {
+            var verifyUrl = "/User/"+ emailFor +"/" + activationCode;
+            var link = Request.Url.AbsoluteUri.Replace(Request.Url.PathAndQuery, verifyUrl);
+
+            
+            var fromEmail = new MailAddress("prakashrwt554@gmail.com", "Pyhton Awesome");
+            var toEmail = new MailAddress(emailId);
+            var fromEmailPassword ="Anonymous@123";
+
+            string subject = "";
+            string body = "";
+            if (emailFor == "VerifyAccount")
+            {
+                subject = "Your account Is successfully created";
+                body = "<br/><br/>We are excited to tell you that your Python Awesome account is " +
+                   "successfully created. Please click on the below link to verify your account" +
+                   "<br/><br/><a href='" + link + "'>Click Here</a>";
+            }
+            else if(emailFor == "ResetPassword")
+            {
+                subject = "Reset Password";
+                body = "Hi, <br/></br>We got request for reset your password. Please click on the below link to reset the password." +
+                    "<br/><br/><a herf='" + link + "'>"+ link +"</a>";
+
+            }
+
+            var smtp = new SmtpClient
+            {
+                Host = "smtp.gmail.com",
+                Port = 587,
+                EnableSsl = true,
+                DeliveryMethod = SmtpDeliveryMethod.Network,
+
+                UseDefaultCredentials = false,
+                Credentials = new System.Net.NetworkCredential(fromEmail.Address, fromEmailPassword)
+            };
+            using (var message = new MailMessage(fromEmail, toEmail)
+            {
+                Subject = subject,
+                Body = body,
+                IsBodyHtml = true
+            })
+
+                smtp.Send(message);
+        }
+
+        //Forgot Password Method For View 
+        public ActionResult ForgotPassword()
+        {
+            return View(); 
+        }
+
+        [HttpPost]
+        public ActionResult ForgotPassword(string EmailID)
+        {
+            //Verify Email ID
+            // Generate Reset Password Link
+            //Send Email
+            string message = "";
+            using (UserAuthenticationEntities db = new UserAuthenticationEntities())
+            {
+                var account = db.Users.Where(a => a.EmailID == EmailID).FirstOrDefault();
+                if(account != null)
+                {
+                    //send email for reser password
+                    string resetCode = Guid.NewGuid().ToString();
+                    SendVerificationLinkEmail(account.EmailID, resetCode, "ResetPassword");
+                    account.ResetPasswordCode = resetCode;
+                    //this line added here to avoid confirm password not match issue, as we have added confirm password proprtiy into our model.
+                    db.Configuration.ValidateOnSaveEnabled = false;
+                    db.SaveChanges();
+                    message = "Reset Password link has been sent at your email Id.";
+
+                }
+                else
+                {
+                    message = "Account Not Found";
+                }
+            }
+
+            ViewBag.Message = message;
+            return View();
+
+        }
+        // Verify reset password link 
+        public ActionResult ResetPassword(string id)
+        {
+            //Verify the reset password link
+            // Find account associsted with this link
+            //redirect to reset password page 
+            using (UserAuthenticationEntities db = new UserAuthenticationEntities())
+            {
+                var user = db.Users.Where(a => a.ResetPasswordCode == id).FirstOrDefault();
+                if(user != null)
+                {
+                    ResetPasswordModel model = new ResetPasswordModel();
+                    model.ResetCode = id;
+                    return View(model);
+                }
+                else
+                {
+                    return HttpNotFound();
+                }
+            }
+                
+        }
+
+        [HttpPost]
+        public ActionResult ResetPassword(ResetPasswordModel model)
+        {
+            var message = "";
+            if(ModelState.IsValid)
+            {
+                using (UserAuthenticationEntities db = new UserAuthenticationEntities())
+                {
+                    var user = db.Users.Where(a => a.ResetPasswordCode == model.ResetCode).FirstOrDefault();
+                    if(user !=null)
+                    {
+                        user.Password = Crypto.Hash(model.NewPassword);
+                        user.ResetPasswordCode = "";
+                        db.Configuration.ValidateOnSaveEnabled = false;
+                        db.SaveChanges();
+                        message = "New Password Updated Successfully, Enjoy your Servecies";
+                    }
+                }
+            }
+            else
+            {
+                message = "Something Invalid";
+            }
+            ViewBag.Message = message;
+            return View(model);
+        }
+    }    
+}
